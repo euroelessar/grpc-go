@@ -151,6 +151,7 @@ type callInfo struct {
 	creds                 credentials.PerRPCCredentials
 	contentSubtype        string
 	codec                 baseCodec
+	rpcStatsHandlers      []stats.RPCHandler
 }
 
 func defaultCallInfo() *callInfo {
@@ -403,6 +404,24 @@ func (o CustomCodecCallOption) before(c *callInfo) error {
 	return nil
 }
 func (o CustomCodecCallOption) after(c *callInfo) { return }
+
+// PerRPCStatsHandler returns a CallOption that adds the stats handler for a
+// call.
+func PerRPCStatsHandler(rpcStatsHandler stats.RPCHandler) CallOption {
+	return PerRPCStatsHandlerCallOption{RPCStatsHandler: rpcStatsHandler}
+}
+
+// PerRPCStatsHandlerCallOption is a CallOption that adds the stats handler for
+// a call.
+type PerRPCStatsHandlerCallOption struct {
+	RPCStatsHandler stats.RPCHandler
+}
+
+func (o PerRPCStatsHandlerCallOption) before(c *callInfo) error {
+	c.rpcStatsHandlers = append(c.rpcStatsHandlers, o.RPCStatsHandler)
+	return nil
+}
+func (o PerRPCStatsHandlerCallOption) after(c *callInfo) { return }
 
 // The format of the payload: compressed or not?
 type payloadFormat uint8

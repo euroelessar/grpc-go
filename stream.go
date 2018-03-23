@@ -207,17 +207,18 @@ func newClientStream(ctx context.Context, desc *StreamDesc, cc *ClientConn, meth
 		}()
 	}
 	ctx = newContextWithRPCInfo(ctx, c.failFast)
-	sh := cc.dopts.copts.StatsHandler
 	var beginTime time.Time
-	if sh != nil {
-		ctx = sh.TagRPC(ctx, &stats.RPCTagInfo{FullMethodName: method, FailFast: c.failFast})
+	if len(c.rpcStatsHandlers) > 0 {
 		beginTime = time.Now()
-		begin := &stats.Begin{
-			Client:    true,
-			BeginTime: beginTime,
-			FailFast:  c.failFast,
+		for _, sh := range c.rpcStatsHandlers {
+			ctx = sh.TagRPC(ctx, &stats.RPCTagInfo{FullMethodName: method, FailFast: c.failFast})
+			begin := &stats.Begin{
+				Client:    true,
+				BeginTime: beginTime,
+				FailFast:  c.failFast,
+			}
+			sh.HandleRPC(ctx, begin)
 		}
-		sh.HandleRPC(ctx, begin)
 		defer func() {
 			if err != nil {
 				// Only handle end stats if err != nil.
@@ -227,7 +228,9 @@ func newClientStream(ctx context.Context, desc *StreamDesc, cc *ClientConn, meth
 					BeginTime: beginTime,
 					EndTime:   time.Now(),
 				}
-				sh.HandleRPC(ctx, end)
+				for _, sh := range c.rpcStatsHandlers {
+					sh.HandleRPC(ctx, end)
+				}
 			}
 		}()
 	}
@@ -278,15 +281,15 @@ func newClientStream(ctx context.Context, desc *StreamDesc, cc *ClientConn, meth
 		comp:   comp,
 		cancel: cancel,
 		attempt: &csAttempt{
-			t:            t,
-			s:            s,
-			p:            &parser{r: s},
-			done:         done,
-			dc:           cc.dopts.dc,
-			ctx:          ctx,
-			trInfo:       trInfo,
-			statsHandler: sh,
-			beginTime:    beginTime,
+			t:                t,
+			s:                s,
+			p:                &parser{r: s},
+			done:             done,
+			dc:               cc.dopts.dc,
+			ctx:              ctx,
+			trInfo:           trInfo,
+			rpcStatsHandlers: c.rpcStatsHandlers,
+			beginTime:        beginTime,
 		},
 	}
 	cs.c.stream = cs
@@ -350,8 +353,8 @@ type csAttempt struct {
 	// and cleared when the finish method is called.
 	trInfo traceInfo
 
-	statsHandler stats.Handler
-	beginTime    time.Time
+	rpcStatsHandlers []stats.RPCHandler
+	beginTime        time.Time
 }
 
 func (cs *clientStream) Context() context.Context {
@@ -449,7 +452,7 @@ func (a *csAttempt) sendMsg(m interface{}) (err error) {
 		a.mu.Unlock()
 	}
 	var outPayload *stats.OutPayload
-	if a.statsHandler != nil {
+	if len(a.rpcStatsHandlers) > 0 {
 		outPayload = &stats.OutPayload{
 			Client: true,
 		}
@@ -466,9 +469,9 @@ func (a *csAttempt) sendMsg(m interface{}) (err error) {
 	}
 	err = a.t.Write(a.s, hdr, data, &transport.Options{Last: !cs.desc.ClientStreams})
 	if err == nil {
-		if outPayload != nil {
+		for _, sh := range a.rpcStatsHandlers {
 			outPayload.SentTime = time.Now()
-			a.statsHandler.HandleRPC(a.ctx, outPayload)
+			sh.HandleRPC(a.ctx, outPayload)
 		}
 		return nil
 	}
@@ -484,7 +487,7 @@ func (a *csAttempt) recvMsg(m interface{}) (err error) {
 		}
 	}()
 	var inPayload *stats.InPayload
-	if a.statsHandler != nil {
+	if len(a.rpcStatsHandlers) > 0 {
 		inPayload = &stats.InPayload{
 			Client: true,
 		}
@@ -522,8 +525,8 @@ func (a *csAttempt) recvMsg(m interface{}) (err error) {
 		}
 		a.mu.Unlock()
 	}
-	if inPayload != nil {
-		a.statsHandler.HandleRPC(a.ctx, inPayload)
+	for _, sh := range a.rpcStatsHandlers {
+		sh.HandleRPC(a.ctx, inPayload)
 	}
 	if cs.desc.ServerStreams {
 		// Subsequent messages should be received by subsequent RecvMsg calls.
@@ -565,14 +568,16 @@ func (a *csAttempt) finish(err error) {
 			BytesReceived: a.s.BytesReceived(),
 		})
 	}
-	if a.statsHandler != nil {
+	if len(a.rpcStatsHandlers) > 0 {
 		end := &stats.End{
 			Client:    true,
 			BeginTime: a.beginTime,
 			EndTime:   time.Now(),
 			Error:     err,
 		}
-		a.statsHandler.HandleRPC(a.ctx, end)
+		for _, sh := range a.rpcStatsHandlers {
+			sh.HandleRPC(a.ctx, end)
+		}
 	}
 	if a.trInfo.tr != nil {
 		if err == nil {
